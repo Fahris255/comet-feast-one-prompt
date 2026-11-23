@@ -1,0 +1,1 @@
+{"description":"Comet Feast — a neon arcade game built by an AI agent from one prompt: a hungry comet eats falling stars, dodges crimson meteors, and bursts into fireworks on every fifth star.","engines":{"node":">=22"},"license":"MIT","name":"comet-feast-one-prompt","scripts":{"start":"node main.ts"},"type":"module","version":"1.0.0"}

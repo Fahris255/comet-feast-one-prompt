@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Comet Feast — one prompt, one game</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body { height: 100%; }
+  body {
+    background: #05060f;
+    color: #eaf2ff;
+    font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+    display: flex; flex-direction: column; align-items: center;
+    min-height: 100vh; padding: 18px 10px 26px;
+    background-image: radial-gradient(1100px 500px at 50% -80px, #16224d 0%, #05060f 60%);
+  }
+  h1 {
+    font-size: 30px; letter-spacing: 4px; font-weight: 800;
+    background: linear-gradient(90deg, #7ef0ff, #c792ff, #ffd76a);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    text-shadow: 0 0 26px rgba(126, 240, 255, .18);
+  }
+  .prompt {
+    max-width: 860px; text-align: center; margin: 8px 0 12px;
+    color: #9fb4dd; font-size: 14px; line-height: 1.5;
+  }
+  .prompt b { color: #ffd76a; font-weight: 600; }
+  #wrap { position: relative; width: min(960px, 96vw); }
+  canvas {
+    width: 100%; display: block; border-radius: 14px;
+    border: 1px solid #26355f;
+    box-shadow: 0 0 0 1px #0a1030, 0 18px 60px rgba(0,0,0,.65), 0 0 44px rgba(80,120,255,.14);
+    background: #070a1c; cursor: none;
+  }
+  .hint { margin-top: 10px; color: #7286ad; font-size: 13px; text-align: center; }
+  .hint span { color: #c9d8ff; }
+</style>
+</head>
+<body>
+  <h1>COMET FEAST</h1>
+  <p class="prompt">Built by an AI agent from one prompt: <b>&ldquo;Build a neon arcade game where a hungry
+  comet races across a midnight sky eating falling stars, dodging crimson meteors, and bursting into
+  fireworks on every fifth star.&rdquo;</b></p>
+  <div id="wrap"><canvas id="game" width="960" height="540"></canvas></div>
+  <p class="hint"><span>Move:</span> mouse or arrow keys / WASD &nbsp;&middot;&nbsp; <span>Eat</span> golden stars
+  &nbsp;&middot;&nbsp; <span>Dodge</span> crimson meteors &nbsp;&middot;&nbsp; Every <span>5th star</span> = fireworks +50
+  &nbsp;&middot;&nbsp; Click or press Space to start / restart</p>
+
+<script>
+"use strict";
+// ---------------------------------------------------------------------------
+// Comet Feast — playable browser version.
+// One canvas, no assets, no libraries: stars, meteors, particles, a comet
+// with a glowing tail, tiered juice (sparks / flashes / fireworks), a little
+// screen shake, hit-stop on the big moments, and WebAudio synth blips.
+// Demo mode (?demo=1) flies the comet on autopilot for recording.
+// ---------------------------------------------------------------------------
+const canvas = document.getElementById("game");
+const ctx = canvas.getContext("2d");
+const W = canvas.width, H = canvas.height;
+const params = new URLSearchParams(location.search);
+const DEMO = params.has("demo");
+
+const STAR_POINTS = 10, FIREWORK_EVERY = 5, FIREWORK_POINTS = 50;
+const COMET_R = 14;
+
+let audioCtx = null;
+function beep(freq, dur, type, gain, slide) {
+  if (DEMO) return;
+  try {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    const t = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const g = audioCtx.createGain();
+    osc.type = type || "sine";
+    osc.frequency.setValueAtTime(freq, t);
+    if (slide) osc.frequency.exponentialRampToValueAtTime(slide, t + dur);
+    g.gain.setValueAtTime(gain || 0.08, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+    osc.connect(g).connect(audioCtx.destination);
+    osc.start(t); osc.stop(t + dur);
+  } catch (e) { /* sound is a garnish, never a blocker */ }
+}
+const sfxEat = () => beep(660 + combo * 24, 0.09, "triangle", 0.07, 990);
+const sfxBoom = () => { beep(180, 0.28, "sawtooth", 0.10, 42); beep(880, 0.20, "sine", 0.05, 1320); };
+const sfxHit = () => beep(140, 0.30, "square", 0.11, 55);
+
+// Seeded sparkle field for the static sky (same sky every load).
+function mulberry(seed) {
+  let s = seed >>> 0;
+  return function () {
+    s = (s + 0x6D2B79F5) >>> 0;
+    let t = s;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+const skyRnd = mulberry(1123);
+const skyStars = [];
+for (let i = 0; i < 150; i++) {
+  skyStars.push({ x: skyRnd() * W, y: skyRnd() * H, r: skyRnd() * 1.5 + 0.3, tw: skyRnd() * Math.PI * 2 });
+}
+
+const easeOutBack = t => { const c1 = 1.70158, c3 = c1 + 1; return 1 + c3 * Math.pow(t - 1, 3) + c1 * Math.pow(t - 1, 2); };
+const easeOutCubic = t => 1 - Math.pow(1 - t, 3);
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+
+let state = "title"; // title | playing | over
+let comet, stars, meteors, particles, pops, tail;
+let score, combo, bestCombo, lives, starsEaten, fireworks, elapsed;
+let shake, hitStop, flashRed, flashGold, spawnStarT, spawnMeteorT, lastTs;
+
+const keys = {};
+let pointer = { x: W / 2, y: H * 0.68, active: false };
+canvas.addEventListener("mousemove", e => {
+  const r = canvas.getBoundingClientRect();
+  pointer.x = (e.clientX - r.left) * (W / r.width);
+  pointer.y = (e.clientY - r.top) * (H / r.height);
+  pointer.active = true;
+});
+canvas.addEventListener("touchmove", e => {
+  const r = canvas.getBoundingClientRect();
+  const t = e.touches[0];
+  pointer.x = (t.clientX - r.left) * (W / r.width);
+  pointer.y = (t.clientY - r.top) * (H / r.height);
+  pointer.active = true;
+  e.preventDefault();
+}, { passive: false });
+window.addEventListener("keydown", e => {
+  keys[e.key.toLowerCase()] = true;
+  if (e.key === " " || e.key === "Enter") { startIfIdle(); e.preventDefault(); }
+  if (["arrowup", "arrowdown", "arrowleft", "arrowright"].includes(e.key.toLowerCase())) e.preventDefault();
+});
+window.addEventListener("keyup", e => { keys[e.key.toLowerCase()] = false; });
+canvas.addEventListener("click", startIfIdle);
+
+function startIfIdle() { if (state !== "playing") reset(); }
+function reset() {
+  comet = { x: W / 2, y: H * 0.68, vx: 0, vy: 0, invuln: 0 };
+  stars = []; meteors = []; particles = []; pops = []; tail = [];
+  score = 0; combo = 0; bestCombo = 0; lives = 3;
+  starsEaten = 0; fireworks = 0; elapsed = 0;
+  shake = 0; hitStop = 0; flashRed = 0; flashGold = 0;
+  spawnStarT = 0.2; spawnMeteorT = 1.6;
+  state = "playing";
+}
+
+function burst(x, y, count, hue, speed, life) {
+  for (let i = 0; i < count; i++) {
+    const a = Math.random() * Math.PI * 2;
+    const sp = (0.3 + Math.random() * 0.7) * speed;
+    const lf = life * (0.6 + Math.random() * 0.7);
+    particles.push({ x, y, vx: Math.cos(a) * sp, vy: Math.sin(a) * sp, life: lf, max: lf, hue: hue + (Math.random() * 44 - 22), size: 1.4 + Math.random() * 2.2 });
+  }
+}
+function popText(x, y, text, color, size) {
+  pops.push({ x, y, text, color, size: size || 20, t: 0 });
+}
+function spawnStar() {
+  stars.push({ x: 30 + Math.random() * (W - 60), y: -18, vy: 95 + Math.random() * 95 + elapsed * 1.1, vx: (Math.random() - 0.5) * 26, r: 9 + Math.random() * 4, spin: Math.random() * 6.28 });
+}
+function spawnMeteor() {
+  meteors.push({ x: 30 + Math.random() * (W - 60), y: -28, vy: 185 + Math.random() * 125 + elapsed * 1.6, vx: (Math.random() - 0.5) * 62, r: 13 + Math.random() * 7, spin: Math.random() * 6.28 });
+}
+
+// Autopilot for demo/recording: chase the ripest star, bend away from meteors.
+function autopilot() {
+  let tx = W / 2, ty = H * 0.6, best = 1e9;
+  for (const s of stars) {
+    const cost = Math.abs(s.x - comet.x) + Math.abs(s.y - comet.y) * 0.6;
+    if (cost < best) { best = cost; tx = s.x; ty = Math.min(H - 40, s.y + s.vy * 0.24); }
+  }
+  let ax = 0, ay = 0;
+  for (const m of meteors) {
+    const dx = comet.x - m.x, dy = comet.y - m.y, d = Math.hypot(dx, dy);
+    if (d < 140 && m.y < comet.y + 30) {
+      const w = (140 - d) / 140;
+      ax += (dx / (d + 1)) * w * 320; ay += (dy < 0 ? 1 : -0.4) * w * 80;
+    }
+  }
+  pointer.x = clamp(tx + ax, 20, W - 20);
+  pointer.y = clamp(ty + ay, 70, H - 24);
+  pointer.active = true;
+}
+
+function eatStar(s) {
+  starsEaten++; combo++;
+  bestCombo = Math.max(bestCombo, combo);
+  const gained = STAR_POINTS + Math.min(40, combo * 2);
+  score += gained;
+  burst(s.x, s.y, 8, 48, 130, 0.45);                    // small tier
+  popText(s.x, s.y - 14, "+" + gained, "#ffd76a", 19);
+  sfxEat();
+  if (combo % FIREWORK_EVERY === 0) {
+    fireworks++; score += FIREWORK_POINTS;
+    burst(s.x, s.y, 34, 185 + (fireworks % 3) * 55, 300, 0.95); // large tier
+    burst(s.x, s.y, 14, 48, 170, 0.7);
+    popText(s.x, s.y - 40, "FIREWORK +" + FIREWORK_POINTS, "#7ef0ff", 27);
+    flashGold = 0.55; shake = Math.max(shake, 5); hitStop = Math.max(hitStop, 0.09);
+    sfxBoom();
+  }
+}
+function hitMeteor(m) {
+  lives--; combo = 0;
+  comet.invuln = 2.4;
+  burst(m.x, m.y, 24, 8, 260, 0.8);
+  popText(comet.x, comet.y - 30, "OUCH!", "#ff6b6b", 26);
+  flashRed = 0.6; shake = Math.max(shake, 11); hitStop = Math.max(hitStop, 0.13);
+  sfxHit();
+  if (lives <= 0) state = "over";
+}
+
+function update(dt) {
+  if (state !== "playing") return;
+  elapsed += dt;
+  if (DEMO) autopilot();
+
+  // Movement: pointer with eased chase, or keys with acceleration.
+  let tx = null, ty = null;
+  if (pointer.active) { tx = pointer.x; ty = pointer.y; }
+  const keyX = (keys["arrowright"] || keys["d"] ? 1 : 0) - (keys["arrowleft"] || keys["a"] ? 1 : 0);
+  const keyY = (keys["arrowdown"] || keys["s"] ? 1 : 0) - (keys["arrowup"] || keys["w"] ? 1 : 0);
+  if (keyX || keyY) { tx = comet.x + keyX * 300; ty = comet.y + keyY * 300; pointer.active = false; }
+  if (tx !== null) {
+    const dx = tx - comet.x, dy = ty - comet.y;
+    const d = Math.hypot(dx, dy);
+    const speed = 560;
+    const step = Math.min(d, speed * dt * (0.4 + 0.6 * easeOutCubic(Math.min(1, d / 120))));
+    if (d > 1) { comet.vx = dx / d * (step / dt); comet.vy = dy / d * (step / dt); comet.x += dx / d * step; comet.y += dy / d * step; }
+  }
+  comet.x = clamp(comet.x, 20, W - 20);
+  comet.y = clamp(comet.y, 64, H - 22);
+  if (comet.invuln > 0) comet.invuln -= dt;
+
+  tail.unshift({ x: comet.x, y: comet.y });
+  if (tail.length > 26) tail.pop();
+
+  spawnStarT -= dt;
+  if (spawnStarT <= 0) { spawnStar(); spawnStarT = 0.34 + Math.random() * 0.3; }
+  spawnMeteorT -= dt;
+  if (spawnMeteorT <= 0) { spawnMeteor(); spawnMeteorT = Math.max(0.75, 1.75 - elapsed * 0.012) + Math.random() * 0.5; }
+
+  for (const s of stars) { s.x += s.vx * dt; s.y += s.vy * dt; s.spin += dt * 3; }
+  for (const m of meteors) { m.x += m.vx * dt; m.y += m.vy * dt; m.spin += dt * 2; }
+  for (const p of particles) { p.x += p.vx * dt; p.y += p.vy * dt; p.vy += 150 * dt; p.life -= dt; }
+  for (const p of pops) { p.t += dt; p.y -= 34 * dt; }
+  particles = particles.filter(p => p.life > 0);
+  pops = pops.filter(p => p.t < 0.85);
+
+  const eaten = stars.filter(s => Math.hypot(s.x - comet.x, s.y - comet.y) < COMET_R + s.r + 5);
+  for (const s of eaten) eatStar(s);
+  if (eaten.length) stars = stars.filter(s => !eaten.includes(s));
+  // A star that lands uneaten just twinkles out — only a meteor breaks the combo.
+  stars = stars.filter(s => s.y < H + 24);
+
+  if (comet.invuln <= 0) {
+    const hit = meteors.find(m => Math.hypot(m.x - comet.x, m.y - comet.y) < COMET_R + m.r - 3);
+    if (hit) { hitMeteor(hit); meteors = meteors.filter(m => m !== hit); }
+  }
+  meteors = meteors.filter(m => m.y < H + 36);
+  shake = Math.max(0, shake - dt * 26);
+  flashRed = Math.max(0, flashRed - dt * 1.8);
+  flashGold = Math.max(0, flashGold - dt * 1.6);
+}
+
+// ---------------------------------------------------------------------------
+// Drawing.
+// ---------------------------------------------------------------------------
+function drawStarShape(x, y, r, rot, fill, glow) {
+  ctx.save();
+  ctx.translate(x, y); ctx.rotate(rot);
+  ctx.beginPath();
+  for (let i = 0; i < 10; i++) {
+    const rad = i % 2 === 0 ? r : r * 0.46;
+    const a = (i / 10) * Math.PI * 2 - Math.PI / 2;
+    if (i === 0) ctx.moveTo(Math.cos(a) * rad, Math.sin(a) * rad);
+    else ctx.lineTo(Math.cos(a) * rad, Math.sin(a) * rad);
+  }
+  ctx.closePath();
+  ctx.shadowColor = glow; ctx.shadowBlur = 16;
+  ctx.fillStyle = fill; ctx.fill();
+  ctx.restore();
+}
+function drawMeteor(m) {
+  ctx.save();
+  ctx.translate(m.x, m.y); ctx.rotate(m.spin);
+  const g = ctx.createRadialGradient(-3, -3, 2, 0, 0, m.r + 6);
+  g.addColorStop(0, "#ffb199"); g.addColorStop(0.45, "#e64533"); g.addColorStop(1, "#7d1408");
+  ctx.shadowColor = "#ff5030"; ctx.shadowBlur = 20;
+  ctx.fillStyle = g;
+  ctx.beginPath();
+  for (let i = 0; i < 9; i++) {
+    const a = (i / 9) * Math.PI * 2;
+    const rad = m.r * (0.82 + 0.22 * Math.sin(i * 7.3));
+    if (i === 0) ctx.moveTo(Math.cos(a) * rad, Math.sin(a) * rad);
+    else ctx.lineTo(Math.cos(a) * rad, Math.sin(a) * rad);
+  }
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+  // flame trail
+  ctx.save();
+  ctx.globalAlpha = 0.35;
+  const fg = ctx.createLinearGradient(m.x, m.y - 44, m.x, m.y);
+  fg.addColorStop(0, "rgba(255,90,40,0)"); fg.addColorStop(1, "rgba(255,120,50,.8)");
+  ctx.fillStyle = fg;
+  ctx.beginPath();
+  ctx.moveTo(m.x - m.r * 0.55, m.y - 4); ctx.lineTo(m.x, m.y - 46); ctx.lineTo(m.x + m.r * 0.55, m.y - 4);
+  ctx.closePath(); ctx.fill();
+  ctx.restore();
+}
+function drawComet(now) {
+  // tail: fading ribbon of past positions
+  for (let i = tail.length - 1; i >= 2; i--) {
+    const p = tail[i], f = 1 - i / tail.length;
+    ctx.beginPath();
+    ctx.arc(p.x, p.y, COMET_R * f * 0.85, 0, Math.PI * 2);
+    ctx.fillStyle = "rgba(110,190,255," + (0.20 * f) + ")";
+    ctx.fill();
+  }
+  const blink = comet.invuln > 0 && Math.floor(now * 14) % 2 === 0;
+  ctx.save();
+  ctx.globalAlpha = blink ? 0.35 : 1;
+  const g = ctx.createRadialGradient(comet.x - 4, comet.y - 5, 2, comet.x, comet.y, COMET_R + 9);
+  g.addColorStop(0, "#ffffff"); g.addColorStop(0.35, "#bfe9ff"); g.addColorStop(0.75, "#4da3ff"); g.addColorStop(1, "rgba(60,110,255,0)");
+  ctx.shadowColor = "#6ec3ff"; ctx.shadowBlur = 26;
+  ctx.fillStyle = g;
+  ctx.beginPath(); ctx.arc(comet.x, comet.y, COMET_R + 7, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+  // hungry eyes
+  ctx.fillStyle = "#0a1440";
+  const lookX = clamp(comet.vx * 0.006, -3, 3), lookY = clamp(comet.vy * 0.006, -3, 3);
+  ctx.beginPath(); ctx.arc(comet.x - 5 + lookX, comet.y - 2 + lookY, 2.1, 0, Math.PI * 2); ctx.fill();
+  ctx.beginPath(); ctx.arc(comet.x + 5 + lookX, comet.y - 2 + lookY, 2.1, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = "#0a1440"; ctx.lineWidth = 1.8;
+  ctx.beginPath(); ctx.arc(comet.x + lookX, comet.y + 3 + lookY, 4.6, 0.15 * Math.PI, 0.85 * Math.PI); ctx.stroke();
+}
+function drawHud() {
+  ctx.save();
+  ctx.fillStyle = "rgba(5,8,24,.55)";
+  ctx.fillRect(0, 0, W, 52);
+  ctx.fillStyle = "#eaf2ff";
+  ctx.font = "800 24px 'Segoe UI', system-ui, sans-serif";
+  ctx.textAlign = "left";
+  ctx.fillText("SCORE " + score, 18, 36);
+  ctx.textAlign = "center";
+  if (combo >= 2) {
+    const popScale = easeOutBack(Math.min(1, combo / 6));
+    ctx.save();
+    ctx.translate(W / 2, 34); ctx.scale(popScale, popScale);
+    ctx.fillStyle = "#ffd76a";
+    ctx.font = "800 23px 'Segoe UI', system-ui, sans-serif";
+    ctx.fillText("COMBO x" + combo, 0, 0);
+    ctx.restore();
+  } else {
+    ctx.fillStyle = "#7286ad"; ctx.font = "600 16px 'Segoe UI', system-ui, sans-serif";
+    ctx.fillText("eat stars, chain the combo", W / 2, 33);
+  }
+  ctx.textAlign = "right";
+  let hearts = "";
+  for (let i = 0; i < 3; i++) hearts += i < lives ? "♥ " : "♡ ";
+  ctx.fillStyle = "#ff7d9c"; ctx.font = "22px sans-serif";
+  ctx.fillText(hearts.trim(), W - 18, 36);
+  ctx.restore();
+}
+function drawCenter(lines, sub) {
+  ctx.save();
+  ctx.fillStyle = "rgba(4,6,18,.62)";
+  ctx.fillRect(0, 0, W, H);
+  ctx.textAlign = "center";
+  let y = H * 0.36;
+  for (const [text, size, color] of lines) {
+    ctx.font = "800 " + size + "px 'Segoe UI', system-ui, sans-serif";
+    ctx.fillStyle = color;
+    ctx.shadowColor = color; ctx.shadowBlur = 18;
+    ctx.fillText(text, W / 2, y);
+    y += size + 16;
+  }
+  ctx.shadowBlur = 0;
+  ctx.fillStyle = "#9fb4dd"; ctx.font = "600 17px 'Segoe UI', system-ui, sans-serif";
+  ctx.fillText(sub, W / 2, y + 8);
+  ctx.restore();
+}
+function render(now) {
+  ctx.save();
+  if (shake > 0) ctx.translate((Math.random() - 0.5) * shake, (Math.random() - 0.5) * shake);
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, "#0a1030"); bg.addColorStop(0.6, "#070a1e"); bg.addColorStop(1, "#04050f");
+  ctx.fillStyle = bg; ctx.fillRect(-16, -16, W + 32, H + 32);
+  for (const s of skyStars) {
+    ctx.globalAlpha = 0.35 + 0.3 * Math.sin(now * 1.7 + s.tw);
+    ctx.fillStyle = "#cfe2ff";
+    ctx.beginPath(); ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  // moon
+  ctx.save();
+  ctx.shadowColor = "#ffe9a8"; ctx.shadowBlur = 30;
+  ctx.fillStyle = "#fdf3c9";
+  ctx.beginPath(); ctx.arc(W - 92, 96, 26, 0, Math.PI * 2); ctx.fill();
+  ctx.shadowBlur = 0; ctx.fillStyle = "#0a1030";
+  ctx.beginPath(); ctx.arc(W - 104, 88, 22, 0, Math.PI * 2); ctx.fill();
+  ctx.restore();
+
+  for (const s of stars) drawStarShape(s.x, s.y, s.r + Math.sin(now * 6 + s.spin) * 1.3, s.spin, "#ffd76a", "#ffb52e");
+  for (const m of meteors) drawMeteor(m);
+  for (const p of particles) {
+    ctx.globalAlpha = Math.max(0, p.life / p.max);
+    ctx.fillStyle = "hsl(" + p.hue + ",95%,64%)";
+    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2); ctx.fill();
+  }
+  ctx.globalAlpha = 1;
+  if (state !== "title") drawComet(now);
+  for (const p of pops) {
+    ctx.save();
+    ctx.globalAlpha = 1 - p.t / 0.85;
+    const sc = easeOutBack(Math.min(1, p.t / 0.22));
+    ctx.translate(p.x, p.y); ctx.scale(sc, sc);
+    ctx.font = "800 " + p.size + "px 'Segoe UI', system-ui, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillStyle = p.color; ctx.shadowColor = p.color; ctx.shadowBlur = 12;
+    ctx.fillText(p.text, 0, 0);
+    ctx.restore();
+  }
+  ctx.restore();
+
+  if (flashGold > 0) { ctx.fillStyle = "rgba(255,205,80," + (flashGold * 0.20) + ")"; ctx.fillRect(0, 0, W, H); }
+  if (flashRed > 0) { ctx.fillStyle = "rgba(255,52,40," + (flashRed * 0.26) + ")"; ctx.fillRect(0, 0, W, H); }
+  drawHud();
+  if (state === "title") {
+    drawCenter([["COMET FEAST", 52, "#7ef0ff"], ["one prompt · one game · sixty seconds of sky", 19, "#c792ff"]],
+      DEMO ? "demo autopilot is flying…" : "Click or press Space — then feast.");
+  } else if (state === "over") {
+    drawCenter([["THE COMET SHATTERED", 40, "#ff8f7d"],
+      ["Score " + score + "  ·  Stars " + starsEaten + "  ·  Fireworks " + fireworks + "  ·  Best combo x" + bestCombo, 20, "#ffd76a"]],
+      "Click or press Space to feast again.");
+  }
+}
+function frame(ts) {
+  const now = ts / 1000;
+  let dt = Math.min(0.033, lastTs ? now - lastTs : 0.016);
+  lastTs = now;
+  if (hitStop > 0) { hitStop -= dt; dt = 0; } // freeze a beat on big moments
+  update(dt);
+  render(now);
+  requestAnimationFrame(frame);
+}
+reset();
+if (DEMO) { /* autopilot takes the controls inside update() */ }
+else state = "title";
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
