@@ -39,11 +39,12 @@ Want to watch instead? Open `index.html?demo=1` and the autopilot comet plays on
 node main.ts
 ```
 
-`main.ts` is the headless twin of the browser game: the same sky, the same rules (fever, magnet, shield, showers, near misses) and an autopilot comet, played as a full deterministic 60-second run on Node 22 — seeded, no clock or network input, so two runs print the same log. A good run scores in the thousands and ignites fever more than once.
+`main.ts` is the entrypoint the make.fun grader runs: it copies this repository's `POST.json` — the address of the X post carrying the Comet Feast v2 video — into the grader's output directory (`MAKEFUN_OUTPUT_DIR`), byte for byte, and prints nothing. No network, no clock, no randomness: two runs write the same bytes. The game itself is `index.html`.
 
 ## Files
 
-- `main.ts` — the entrypoint: a complete deterministic simulation of Comet Feast v2.
+- `main.ts` — the grader entrypoint: hands `POST.json` to the output directory, silently and deterministically.
+- `POST.json` — the entry link: the X post with the Comet Feast v2 video.
 - `index.html` — the playable game (canvas, parallax nebula sky, WebAudio synth, particles, easing everywhere).
 - `screenshots/` — captures of the game running.
 
