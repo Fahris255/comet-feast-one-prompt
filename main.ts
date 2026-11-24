@@ -110,6 +110,7 @@ class CometFeastV2 {
   showersRidden = 0;
   powerupsTaken = 0;
   feverTicks = 0;
+  feverIgnitions = 0;
   lives = START_LIVES;
   private shieldUp = false;
   private magnetUntil = 0;
@@ -244,6 +245,7 @@ class CometFeastV2 {
     this.score += gained;
     this.burst(star.x, star.y, this.fever ? 12 : 8, this.fever ? 42 : 48);
     if (!wasFever && this.fever) {
+      this.feverIgnitions += 1;
       this.log.push(
         `tick ${this.tick}: FEVER ignites at combo x${this.combo} — every point counts double`,
       );
@@ -415,7 +417,7 @@ class CometFeastV2 {
     this.log.push(
       `final: score=${this.score} stars=${this.starsEaten} fireworks=${this.fireworks} ` +
         `bestCombo=x${this.bestCombo} nearMisses=${this.nearMisses} showers=${this.showersRidden} ` +
-        `powerups=${this.powerupsTaken} feverSeconds=${(this.feverTicks / TICKS_PER_SECOND).toFixed(1)} lives=${this.lives}`,
+        `powerups=${this.powerupsTaken} feverSeconds=${(this.feverTicks / TICKS_PER_SECOND).toFixed(1)} feverIgnitions=${this.feverIgnitions} lives=${this.lives}`,
     );
     const flourish = [0.25, 0.5, 0.75, 1].map((t) => easeOutBack(t).toFixed(3)).join(", ");
     this.log.push(`firework bloom curve (easeOutBack samples): ${flourish}`);
